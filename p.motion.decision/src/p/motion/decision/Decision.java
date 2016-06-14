@@ -2,117 +2,45 @@ package p.motion.decision;
 
 import java.util.LinkedList;
 
+import p.motion.decision.PubSubHandler;
 import redis.clients.jedis.Jedis;
 
-/*
- * Cam position:
- * 	initial 62
- * 
- * Normal running speed: 120 - 127
- * 
- * 
- */
 public class Decision {
 
-	final public static int CAM_INIT_ANGLE = 62;
+	public final static String KITTYBOT_URI = "192.168.43.206";
+	public final static String VISION_UPDATE = "VISION";
+	public final static String MOTION_UPDATE = "MOTION";
+	public final static int CAM_INIT_ANGLE = 62;
 
 	public static int w = 320;
 	public static int h = 240;
 
-	private static Runnable thread = new Runnable() {
-
-		@Override
-		public void run() {
-
-			setCamTilt(CAM_INIT_ANGLE);
-
-			for (;;) {
-				separateHVLines();
-				mergeVLines();
-				// mergeHLines();
-
-				leftSpeed = 120;
-				rightSpeed = 127;
-
-				System.out.println("Line size: " + lines.size());
-				System.out.println("Left speed: " + leftSpeed);
-				System.out.println("Right speed: " + rightSpeed);
-
-				updateSpeed();
-
-				if (lines.size() > 2000) {
-					lines.clear();
-				}
-				try {
-					Thread.sleep(1000);
-				} catch (InterruptedException e) {
-					e.printStackTrace();
-				}
-
-				leftSpeed = 0;
-				rightSpeed = 0;
-				updateSpeed();
-
-				shutdownWheels();
-				break;
-			}
-		}
-	};
-
-	private static void setCamTilt(int angle) {
+	static void setCamTilt(int angle) {
 		JedisQuery.mset("TILT", String.valueOf(angle));
-		JedisQuery.publish(MotionDecision.MOTION_UPDATE, "UPDATE");
+		JedisQuery.publish(MOTION_UPDATE, "UPDATE");
 	}
 
-	private static void shutdownWheels() {
+	static void shutdownWheels() {
 		JedisQuery.mset("LEFT_ON", "0", "RIGHT_ON", "0");
-		JedisQuery.publish(MotionDecision.MOTION_UPDATE, "UPDATE");
+		JedisQuery.publish(MOTION_UPDATE, "UPDATE");
 	}
 
-	private static void updateSpeed() {
+	static void updateSpeed() {
 		JedisQuery.mset("LEFT", String.valueOf(leftSpeed), "RIGHT",
 				String.valueOf(rightSpeed), "LEFT_ON", "1", "RIGHT_ON", "1");
-		JedisQuery.publish(MotionDecision.MOTION_UPDATE, "UPDATE");
+		JedisQuery.publish(MOTION_UPDATE, "UPDATE");
 	}
 
+	private static Jedis JedisSub;
 	private static Jedis JedisQuery;
-	private static int leftSpeed = 0;
-	private static int rightSpeed = 0;
+	static int leftSpeed = 0;
+	static int rightSpeed = 0;
 
-	private static class TLA {
-		long ts;
-		int length;
-		double angle;
-
-		int top = -1;
-		int bottom = -1;
-		int left = -1;
-		int right = -1;
-
-		boolean isVertical() {
-			if (top != -1 && bottom != -1 && left == -1 && right == -1) {
-				return true;
-			} else {
-				return false;
-			}
-		}
-
-		boolean isHorizontal() {
-			if (top == -1 && bottom == -1 && left != -1 && right != -1) {
-				return true;
-			} else {
-				return false;
-			}
-		}
-		
-		boolean alreadyMerged = false;
-	}
-
-	private static LinkedList<TLA> lines = new LinkedList<TLA>();
-	private static LinkedList<TLA> vLines = new LinkedList<TLA>();
-	private static LinkedList<TLA> hLines = new LinkedList<TLA>();
-	private static TLA vLine = new TLA();
-	private static TLA hLine = new TLA();
+	static LinkedList<TLA> lines = new LinkedList<TLA>();
+	static LinkedList<TLA> vLines = new LinkedList<TLA>();
+	static LinkedList<TLA> hLines = new LinkedList<TLA>();
+	static TLA vLine;
+	static TLA hLine;
 
 	public static void addLine(long ts, int length, double angle) {
 		TLA tla = new TLA();
@@ -122,31 +50,20 @@ public class Decision {
 		lines.add(tla);
 	}
 
-	public static int getLeftSpeed() {
-		return leftSpeed;
-	}
-
-	public static int getRightSpeed() {
-		return rightSpeed;
-	}
-
-	public static void startThread() {
-		JedisQuery = new Jedis("192.168.43.206");
-
-		Thread t = new Thread(thread);
-		t.start();
-	}
-
-	private static void separateHVLines() {
+	static void separateHVLines() {
 		int lineSize = lines.size();
-		long currentTs = System.currentTimeMillis();
+
+		// long currentTs = System.currentTimeMillis();
 		vLines.clear();
 		hLines.clear();
 		for (int i = 0; i < lineSize; i++) {
 			TLA line = lines.pollLast();
-			if (currentTs - line.ts > 2000) {
-				continue;
-			}
+			// if (currentTs - line.ts > 2000) {
+			// System.out.println("line is too old, break");
+			// System.out.println(currentTs);
+			// System.out.println(line.ts);
+			// break;
+			// }
 
 			// instead of doing calculations on the fly, this part could be
 			// pre-calculated.
@@ -179,68 +96,106 @@ public class Decision {
 		}
 	}
 
-	private static void mergeVLines() {
-		// if lines are close by(within xx pixels), they can be merged.
-		// if there are more than 3 lines,
-		// 160-132 = 28 px is the width of the black line
-		TLA[] vLineArr = vLines.toArray(new TLA[vLines.size()]);
-		for (int i = 0; i < vLineArr.length; i++) {
-			TLA line1 = vLineArr[i];
-			for (int j = i + 1; j < vLineArr.length; j++) {
-				TLA line2 = vLineArr[j];
-				int topDist = line1.top - line2.top;
-				int bottomDist = line1.bottom - line2.bottom;
-				if (Integer.signum(topDist) == Integer.signum(bottomDist)) {
-					if (Math.abs(topDist) < 30 && Math.abs(bottomDist) < 30) {
-						// Merge
-						// New line is the middle point
-						// New line will override line1 and no more merge. 
-						break;
-					} else {
-						// Do nothing
-					}
-				}else{
-					// Do nothing
-				}
-			}
-
-		}
-
-		for (TLA line1 : hLines) {
-			double a = Math.cos(line1.angle);
-			double b = Math.sin(line1.angle);
-
-			int topX = (int) (line1.length / a);
-			int bottomX = (int) ((line1.length - Decision.h * b) / a);
-			if (bottomX >= 80 && bottomX <= 240) {
-				if (topX >= 110 && topX <= 210) {
-					// Go straight with minor adjustments
-				}
-			}
-			if ((bottomX >= 0 && bottomX < 80)
-					|| (bottomX > 240 && bottomX <= 320)) {
-				if (topX >= 0 && topX <= 320) {
-					// Go straight with major adjustments
-				}
+	static void mergeVLines() {
+		// amongst all the vertical lines, use one that is closest to the bottom
+		// center.
+		int minBottom = Integer.MAX_VALUE;
+		TLA bestLine = null;
+		for (TLA line : vLines) {
+			int bottom = Math.abs(w / 2 - line.bottom);
+			if (bottom < minBottom) {
+				bestLine = line;
+				minBottom = bottom;
 			}
 		}
+		vLine = bestLine;
 	}
 
-	/**
-	 * input: guaranteed lines output: angle and speed
-	 */
-	public static void decideSpeedAndAngle(TLA[] lines) {
+	static void mergeHLines() {
+		// amongst all the horizontal lines, use one whose mid-point is closest
+		// to the bottom
+		int minBottom = Integer.MAX_VALUE;
+		TLA bestLine = null;
+		for (TLA line : hLines) {
+			int bottom = Math.abs(line.left - line.right) / 2
+					+ (line.left > line.right ? line.right : line.left);
+			if (bottom < minBottom) {
+				bestLine = line;
+				minBottom = bottom;
+			}
+		}
+		hLine = bestLine;
+	}
+
+	static void decideVSpeed() {
 		// if there's a vertical line in the center, then go straight.
-		// if the vertical line has angle,
-		for (TLA line : lines) {
+		// if the vertical line has angle, turn the wheels accordingly.
+		int leftSpeedFactor = 0;
+		int rightSpeedFactor = 0;
+		if (vLine != null) {
+			int top = w / 2 - vLine.top;
+			int bottom = w / 2 - vLine.bottom;
+
+			int angle = (int) Math.toDegrees(vLine.angle);
+
+			System.out.println("vLine.angle: " + angle);
+
+			if (angle > 100) {
+				if (top > 0) {
+					if (angle < 176) {
+						// Should turn left
+						leftSpeedFactor = -1;
+					}
+				}
+			} else { // angle < 100
+				if (top < 0) {
+					if (angle > 4) {
+						// Should turn right
+						rightSpeedFactor = -1;
+					}
+				}
+
+			}
+
+			// if (top > 0) {
+			// // left should turn slower, but not a lot
+			// leftSpeedFactor = (double) (160 - top) / (160 * 2);
+			// } else if (top < 0) {
+			// // right should turn slower, but not a lot
+			// rightSpeedFactor = (double) (160 + top) / (160 * 2);
+			// } else {
+			// // go straight
+			// }
+
+			// if (bottom > 0) {
+			// // left should turn slower, but not a lot
+			// leftSpeedFactor = (double) (160 - bottom) / 160;
+			// } else if (bottom < 0) {
+			// // right should turn slower, but not a lot
+			// rightSpeedFactor = (double) (160 + bottom) / 160;
+			// } else {
+			// // go straight
+			// }
+
+			leftSpeed = 123 + leftSpeedFactor;
+			rightSpeed = 123 + rightSpeedFactor;
+
+			// System.out.println("Left speed factor: " + leftSpeedFactor);
+			// System.out.println("Right speed factor: " + rightSpeedFactor);
+			//
+			// System.out.println("Left speed: " + Decision.leftSpeed);
+			// System.out.println("Right speed: " + Decision.rightSpeed);
 
 		}
 	}
 
-	/**
-	 * input: angle and speed output: motor commands
-	 */
-	public static void decideMotorCommand() {
+	public static void main(String[] args) {
+		JedisQuery = new Jedis(KITTYBOT_URI);
 
+		Thread t = new Thread(new DecisionLoop());
+		t.start();
+
+		JedisSub = new Jedis(KITTYBOT_URI);
+		JedisSub.subscribe(new PubSubHandler(), VISION_UPDATE);
 	}
 }
